@@ -3,6 +3,8 @@ from loguru import logger
 import os
 import time
 from telebot.types import InputFile
+import boto3
+from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 
 
 class Bot:
@@ -17,7 +19,10 @@ class Bot:
         time.sleep(0.5)
 
         # set the webhook URL
-        self.telegram_bot_client.set_webhook(url=f'{telegram_chat_url}/{token}/', timeout=60)
+        self.telegram_bot_client.set_webhook(url=f'{telegram_chat_url}/'
+                                                 f'{token}/', timeout=60,
+                                             certificate=open("my_cert.pem", "r"))
+
 
         logger.info(f'Telegram Bot information\n\n{self.telegram_bot_client.get_me()}')
 
@@ -73,5 +78,46 @@ class ObjectDetectionBot(Bot):
             photo_path = self.download_user_photo(msg)
 
             # TODO upload the photo to S3
+            chat_id = msg['chat']['id']
+            s3_client = boto3.client('s3')
+            bucket_name = os.environ['BUCKET_NAME']
+            image_name = os.path.basename(photo_path)
+
+            try:
+                s3_client.upload_file(photo_path, bucket_name, image_name)
+                logger.info(f'Image {image_name} uploaded to S3 bucket {bucket_name}.')
+                self.send_text(chat_id, "Image successfully uploaded to S3.")
+            except NoCredentialsError:
+                self.send_text(chat_id, "Error: AWS credentials not found.")
+                logger.error('AWS credentials not found.')
+                return
+            except Exception as e:
+                self.send_text(chat_id, f"Error uploading image to S3: {str(e)}")
+                logger.error(f'Error uploading image to S3: {str(e)}')
+                return
+
             # TODO send a job to the SQS queue
-            # TODO send message to the Telegram end-user (e.g. Your image is being processed. Please wait...)
+
+            sqs_client = boto3.client('sqs', region_name='eu-north-1')
+            queue_url = os.environ['SQS_QUEUE_NAME']
+            try:
+                # Create message body
+                message_body = {
+                    'image_name': image_name,
+                    'bucket_name': bucket_name,
+                    'chat_id': chat_id
+                }
+                response = sqs_client.send_message(
+                    QueueUrl=queue_url,
+                    MessageBody=str(message_body)
+                )
+                logger.info(f'Message sent to SQS queue with response: {response}')
+                self.send_text(chat_id, "Your image is being processed. Please wait...")
+            except Exception as e:
+                self.send_text(chat_id, f"Error sending message to SQS: {str(e)}")
+                logger.error(f'Error sending message to SQS: {str(e)}')
+                return
+
+
+
+
